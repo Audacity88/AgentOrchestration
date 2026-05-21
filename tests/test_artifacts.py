@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from src.common.artifacts import ArtifactManifestReader
 from src.common.errors import ArtifactIntegrityError, ArtifactManifestError
+from src.storage import ArtifactManifestReader
 
 
 def write_manifest(path, artifact_id, digest):
@@ -41,6 +41,7 @@ class TestArtifactManifestReader:
         alerts = []
         reader = ArtifactManifestReader(
             quarantine_dir=tmp_path / "quarantine",
+            blocked_cache_dir=tmp_path / "blocked-cache",
             alert_handler=alerts.append,
         )
 
@@ -52,9 +53,49 @@ class TestArtifactManifestReader:
         alert = alerts[0]
         assert alert.artifact_id == "agent-plan"
         assert alert.expected_digest != alert.actual_digest
+        assert alert.blocked_marker.exists()
         assert alert.quarantined_path.exists()
         assert alert.quarantined_path.read_bytes() == b"tampered bytes"
         assert exc_info.value.alert == alert
+        marker = json.loads(alert.blocked_marker.read_text(encoding="utf-8"))
+        assert marker["reason"] == "artifact_integrity_mismatch"
+        assert marker["expected_digest"] == alert.expected_digest
+        assert marker["actual_digest"] == alert.actual_digest
+
+    def test_blocked_marker_prevents_cache_reuse(self, tmp_path):
+        blob = tmp_path / "artifact.bin"
+        blob.write_bytes(b"replacement bytes")
+        manifest = tmp_path / "manifest.json"
+        replacement_digest = hashlib.sha256(blob.read_bytes()).hexdigest()
+        write_manifest(manifest, "agent-plan", replacement_digest)
+        blocked_dir = tmp_path / "blocked-cache"
+        blocked_dir.mkdir()
+        marker = blocked_dir / "agent-plan.blocked.json"
+        marker.write_text(
+            json.dumps(
+                {
+                    "artifact_id": "agent-plan",
+                    "reason": "artifact_integrity_mismatch",
+                    "expected_digest": "expected-from-first-failure",
+                    "actual_digest": "actual-from-first-failure",
+                }
+            ),
+            encoding="utf-8",
+        )
+        alerts = []
+        reader = ArtifactManifestReader(
+            blocked_cache_dir=blocked_dir,
+            alert_handler=alerts.append,
+        )
+
+        with pytest.raises(ArtifactIntegrityError) as exc_info:
+            reader.read(manifest, blob)
+
+        assert alerts == [exc_info.value.alert]
+        assert blob.exists()
+        assert alerts[0].blocked_marker == marker
+        assert alerts[0].expected_digest == "expected-from-first-failure"
+        assert alerts[0].actual_digest == "actual-from-first-failure"
 
     def test_quarantine_preserves_existing_evidence(self, tmp_path):
         payload = b"tampered bytes"
@@ -74,6 +115,7 @@ class TestArtifactManifestReader:
         alerts = []
         reader = ArtifactManifestReader(
             quarantine_dir=quarantine_dir,
+            blocked_cache_dir=tmp_path / "blocked-cache",
             alert_handler=alerts.append,
         )
 
@@ -98,6 +140,7 @@ class TestArtifactManifestReader:
         alerts = []
         reader = ArtifactManifestReader(
             quarantine_dir=quarantine_file,
+            blocked_cache_dir=tmp_path / "blocked-cache",
             alert_handler=alerts.append,
         )
 
@@ -120,3 +163,21 @@ class TestArtifactManifestReader:
 
         with pytest.raises(ArtifactManifestError):
             ArtifactManifestReader().read(manifest, blob)
+
+    def test_manifest_can_identify_relative_blob_path(self, tmp_path):
+        blob = tmp_path / "artifact.bin"
+        payload = b"trusted artifact bytes"
+        blob.write_bytes(payload)
+        manifest = tmp_path / "manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "artifact_id": "agent-plan",
+                    "digest": hashlib.sha256(payload).hexdigest(),
+                    "path": blob.name,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        assert ArtifactManifestReader().read(manifest) == payload
