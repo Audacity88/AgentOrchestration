@@ -181,3 +181,23 @@ class TestArtifactManifestReader:
         )
 
         assert ArtifactManifestReader().read(manifest) == payload
+
+    def test_explicit_relative_blob_path_resolves_from_manifest_dir(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        blob = tmp_path / "artifact.bin"
+        payload = b"trusted artifact bytes"
+        blob.write_bytes(payload)
+        manifest = tmp_path / "manifest.json"
+        write_manifest(
+            manifest,
+            "agent-plan",
+            hashlib.sha256(payload).hexdigest(),
+        )
+        other_cwd = tmp_path / "other-cwd"
+        other_cwd.mkdir()
+        monkeypatch.chdir(other_cwd)
+
+        assert ArtifactManifestReader().read(manifest, blob.name) == payload

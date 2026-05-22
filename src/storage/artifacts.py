@@ -245,7 +245,10 @@ def resolve_blob_path(
     explicit_blob_path: Optional[PathInput],
 ) -> Path:
     if explicit_blob_path is not None:
-        return Path(explicit_blob_path)
+        blob_path = Path(explicit_blob_path)
+        if blob_path.is_absolute():
+            return blob_path
+        return manifest_path.parent / blob_path
     if manifest.blob_path is not None:
         return manifest.blob_path
     raise ArtifactManifestError(
